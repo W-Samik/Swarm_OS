@@ -4,15 +4,21 @@ import time
 import sys
 import json
 import zmq
-import argparse # NEW: For professional terminal commands
+import argparse
 
-# NEW: Absolute imports based on the package name
+# Absolute imports based on the package name
 from swarm_os.network_core import SwarmCommRouter
 from swarm_os.model_surgeon import ShardedLlama
 from swarm_os.swarm_discovery import SwarmDiscovery
 
+# 🌟 MODEL PRESETS 🌟
+MODEL_MAP = {
+    "tiny": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",      # 22 Layers (Fastest)
+    "qwen": "Qwen/Qwen2.5-1.5B-Instruct",             # 28 Layers (Smarter, AMD Friendly)
+    "solar": "upstage/SOLAR-10.7B-Instruct-v1.0"      # Large (For heavy gaming laptops)
+}
+
 def main():
-    # Set up a professional command-line argument parser
     parser = argparse.ArgumentParser(description="Swarm-OS: Decentralized AI Inference")
     parser.add_argument(
         '--role', 
@@ -20,15 +26,25 @@ def main():
         required=True, 
         help="Specify 'A' for Master Node or 'B' for Worker Node."
     )
+    parser.add_argument(
+        '--model',
+        default='tiny',
+        help="Choose model preset ('tiny', 'qwen') or paste a HuggingFace Model ID."
+    )
     args = parser.parse_args()
     role = args.role
-
+    
+    # Resolve Model ID
+    model_id = MODEL_MAP.get(args.model, args.model)
+    
     discovery = None
+    net = None
 
     try:
         if role == 'B':
             print("======================================")
             print("🟢 INITIALIZING SWARM WORKER (NODE B) 🟢")
+            print(f"📦 Model: {model_id}")
             print("======================================")
             
             PORT_B = 8888
@@ -36,66 +52,64 @@ def main():
             discovery.broadcast_presence()
             
             net = SwarmCommRouter(node_id="B", listen_port=PORT_B)
-            brain = ShardedLlama(role="B")
+            brain = ShardedLlama(model_id=model_id, role="B")
             
             print("\n[Node B] Broadcasting... Waiting for Master Node A to find me...")
+            print("(Press Ctrl+C to stop the worker safely)")
             
             memory_cache_B = None
-            seq_len_B = 0 # NEW: Track RoPE position
+            seq_len_B = 0 
             
+            # 🌟 GRACEFUL TERMINATION LOOP 🌟
             while True:
-                incoming_numpy = net.recv_tensor()
-                
-                # ... [Keep the handshake & connect-back logic the exact same] ...
-                # --- AUTO-CONNECT BACK TO A ---
-                if incoming_numpy.size == 5 and incoming_numpy[0] == -99.0:
-                    ip_parts = [int(x) for x in incoming_numpy]
-                    master_ip = f"{ip_parts[1]}.{ip_parts[2]}.{ip_parts[3]}.{ip_parts[4]}"
-                    print(f"\n[Node B] Master Node A identified at {master_ip}. Connecting back...")
-                    net.connect_to_next_node(master_ip, 7777)
-                    net.send_tensor(np.array([-2.0], dtype=np.float16)) 
-                    print("[Node B] Swarm Link Active. Waiting for AI Tensors...\n")
-                    continue
+                try:
+                    incoming_numpy = net.recv_tensor()
+                    
+                    if incoming_numpy.size == 1 and incoming_numpy[0] == -999.0:
+                        memory_cache_B = None
+                        seq_len_B = 0 
+                        net.send_tensor(np.array([-2.0], dtype=np.float16))
+                        continue
+                    
+                    if incoming_numpy.size == 5 and incoming_numpy[0] == -99.0:
+                        ip_parts = [int(x) for x in incoming_numpy]
+                        master_ip = f"{ip_parts[1]}.{ip_parts[2]}.{ip_parts[3]}.{ip_parts[4]}"
+                        print(f"\n[Node B] Master Node A identified at {master_ip}. Connecting back...")
+                        net.connect_to_next_node(master_ip, 7777)
+                        net.send_tensor(np.array([-2.0], dtype=np.float16)) 
+                        print("[Node B] Swarm Link Active. Waiting for AI Tensors...\n")
+                        continue
+                    
+                    if incoming_numpy.size > 10: 
+                        device = brain.model.device
+                        hidden_states_tensor = torch.from_numpy(incoming_numpy).to(dtype=torch.float16, device=device)
+                        
+                        token_id_numpy, memory_cache_B, seq_len_B = brain.process_node_B(
+                            hidden_states_tensor, 
+                            past_key_values=memory_cache_B,
+                            current_seq_length=seq_len_B
+                        )
+                        net.send_tensor(token_id_numpy)
 
-                # --- MEMORY WIPE COMMAND ---
-                if incoming_numpy.size == 1 and incoming_numpy[0] == -999.0:
-                    memory_cache_B = None
-                    seq_len_B = 0 # RESET THE CLOCK
-                    net.send_tensor(np.array([-2.0], dtype=np.float16))
-                    continue
+                        # Hacker Visualization
+                        predicted_word = brain.tokenizer.decode([int(token_id_numpy[0])])
+                        safe_word = predicted_word.replace('\n', '\\n').replace('\r', '')
+                        payload_size = incoming_numpy.nbytes / 1024
+                        print(f"⚙️ [Node B] 📥 {payload_size:.2f}KB | 🎯 Predicted: '{safe_word}'")
                 
-                # --- AI INFERENCE (STATEFUL + ROPE SYNCED) ---
-                if incoming_numpy.size > 10: 
-                    device = brain.model.device
-                    hidden_states_tensor = torch.from_numpy(incoming_numpy).to(dtype=torch.float16, device=device)
-                    
-                    # Process with memory AND RoPE position
-                    token_id_numpy, memory_cache_B, seq_len_B = brain.process_node_B(
-                        hidden_states_tensor, 
-                        past_key_values=memory_cache_B,
-                        current_seq_length=seq_len_B
-                    )
-                    net.send_tensor(token_id_numpy)
-
-                    # --- 🌟 NEW: THE "HACKER" VISUALIZATION FOR NODE B 🌟 ---
-                    # Decode the raw integer ID into an actual English word for the judges to see
-                    predicted_word = brain.tokenizer.decode([int(token_id_numpy[0])])
-                    
-                    # Clean up formatting so newlines don't break our beautiful console logs
-                    safe_word = predicted_word.replace('\n', '\\n').replace('\r', '')
-                    payload_size = incoming_numpy.nbytes / 1024
-                    
-                    # Print the live server telemetry!
-                    print(f"⚙️ [Node B Compute] 📥 Rcvd: {payload_size:.2f}KB Tensor | 🧠 Executed Layers 11-21 | 🎯 Predicted: '{safe_word}' | 📤 Sent to Node A")
+                except zmq.ZMQError:
+                    # Ignore socket errors during shutdown
+                    break
 
         elif role == 'A':
             print("======================================")
             print("🔵 INITIALIZING SWARM MASTER (NODE A) 🔵")
+            print(f"📦 Model: {model_id}")
             print("======================================")
             
             PORT_A = 7777
             net = SwarmCommRouter(node_id="A", listen_port=PORT_A)
-            brain = ShardedLlama(role="A")
+            brain = ShardedLlama(model_id=model_id, role="A")
             
             print("\n[Node A] Activating mDNS Radar to find workers...")
             discovery = SwarmDiscovery(node_id="Master_A", port=PORT_A)
@@ -132,98 +146,81 @@ def main():
                         handshake_successful = True
                 except zmq.Again: pass
 
-            # --- THE MAGIC LLM LOOP (ACCURATE & STATELESS) ---
             print("\n======================================")
             print("       SWARM OS CONSOLE ACTIVE        ")
             print("  Type 'exit' to shut down the swarm. ")
             print("======================================")
             
             while True:
-                user_input = input("\n[Judge / User]: ")
-                if user_input.lower() == 'exit': break
-                
-                # Wipe Node B's memory
-                net.send_tensor(np.array([-999.0], dtype=np.float16))
-                ack = net.recv_tensor()
-                while ack.size > 1 or ack[0] != -2.0: ack = net.recv_tensor()
+                try:
+                    user_input = input("\n[Judge / User]: ")
+                    if user_input.lower() == 'exit': break
+                    
+                    net.send_tensor(np.array([-999.0], dtype=np.float16))
+                    ack = net.recv_tensor()
+                    while ack.size > 1 or ack[0] != -2.0: ack = net.recv_tensor()
 
-                # 2. PREPARE THE PROMPT
-                prompt = (
-                    f"<|system|>\nYou are Swarm-OS, an intelligent decentralized AI assistant. "
-                    f"Write clean, accurate, and concise answers.</s>\n"
-                    f"<|user|>\n{user_input}</s>\n<|assistant|>\n"
-                )
-                
-                memory_cache_A = None 
-                input_data = prompt 
-                seq_len_A = 0 
-                generated_token_ids =[]
-                previously_printed_text = "" 
-                
-                # --- Telemetry Trackers ---
-                tokens_generated = 0
-                start_time = time.perf_counter()
-
-                print(f"\n⚙️ [Node A Compute] Analyzing Prompt & Initializing KV-Cache...")
-                print(f"🧠 [Node A Compute] Executing Layers 0-10 locally...")
-
-                # --- Dynamic Ceiling (Max 1024 tokens) ---
-                for i in range(1024):
-                    intermediate_tensor, memory_cache_A, seq_len_A = brain.process_node_A(
-                        prompt_or_token=input_data, 
-                        past_key_values=memory_cache_A, 
-                        current_seq_length=seq_len_A
+                    prompt = (
+                        f"<|system|>\nYou are Swarm-OS. Answer accurately and concisely.</s>\n"
+                        f"<|user|>\n{user_input}</s>\n<|assistant|>\n"
                     )
                     
-                    tensor_numpy = intermediate_tensor.cpu().numpy().astype(np.float16)
-                    payload_size = tensor_numpy.nbytes / 1024
-                    
-                    # 🌟 THE CLARITY LOG: Print the massive first payload size! 🌟
-                    if i == 0:
-                        print(f"📤[Node A Network] Sent {payload_size:.2f}KB Tensor to Node B over ZeroMQ.\n")
-                        print(f"💬 Swarm-AI: ", end="", flush=True)
+                    memory_cache_A = None 
+                    input_data = prompt 
+                    seq_len_A = 0 
+                    generated_token_ids = []
+                    previously_printed_text = "" 
+                    tokens_generated = 0
+                    start_time = time.perf_counter()
 
-                    net.send_tensor(tensor_numpy)
-                    
-                    returned_token_id_numpy = net.recv_tensor()
-                    while returned_token_id_numpy.size > 1 or returned_token_id_numpy[0] < 0:
-                        returned_token_id_numpy = net.recv_tensor()
-                    
-                    new_id = int(returned_token_id_numpy[0])
-                    generated_token_ids.append(new_id)
-                    tokens_generated += 1
-                    
-                    full_decoded_text = brain.tokenizer.decode(generated_token_ids, skip_special_tokens=True)
-                    new_text_to_print = full_decoded_text[len(previously_printed_text):]
-                    print(new_text_to_print, end="", flush=True)
-                    previously_printed_text = full_decoded_text
-                    
-                    # The AI naturally emits this token when its answer is complete
-                    if new_id == brain.tokenizer.eos_token_id: 
-                        break
+                    print(f"\n⚙️ [Node A Compute] Analyzing Prompt & Initializing KV-Cache...")
+                    print(f"🧠 [Node A Compute] Executing Layers locally...")
+
+                    for i in range(1024):
+                        intermediate_tensor, memory_cache_A, seq_len_A = brain.process_node_A(
+                            prompt_or_token=input_data, 
+                            past_key_values=memory_cache_A, 
+                            current_seq_length=seq_len_A
+                        )
                         
-                    input_data = new_id 
+                        tensor_numpy = intermediate_tensor.cpu().numpy().astype(np.float16)
+                        if i == 0:
+                            payload_size = tensor_numpy.nbytes / 1024
+                            print(f"📤[Node A Network] Sent {payload_size:.2f}KB Tensor to Node B over ZeroMQ.\n")
+                            print(f"💬 Swarm-AI: ", end="", flush=True)
 
-                # --- Print Structural Telemetry ---
-                end_time = time.perf_counter()
-                generation_time = end_time - start_time
-                tps = tokens_generated / generation_time
-                
-                print(f"\n\n[📉 Network Math: {tokens_generated} x 4.09KB recursive tensors transmitted to Node B]")
-                print(f"[⚡ Swarm Telemetry: {tokens_generated} tokens generated in {generation_time:.2f}s | Speed: {tps:.2f} Tokens/Sec]")
+                        net.send_tensor(tensor_numpy)
+                        
+                        returned_token_id_numpy = net.recv_tensor()
+                        while returned_token_id_numpy.size > 1 or returned_token_id_numpy[0] < 0:
+                            returned_token_id_numpy = net.recv_tensor()
+                        
+                        new_id = int(returned_token_id_numpy[0])
+                        generated_token_ids.append(new_id)
+                        tokens_generated += 1
+                        
+                        full_decoded_text = brain.tokenizer.decode(generated_token_ids, skip_special_tokens=True)
+                        new_text_to_print = full_decoded_text[len(previously_printed_text):]
+                        print(new_text_to_print, end="", flush=True)
+                        previously_printed_text = full_decoded_text
+                        
+                        if new_id == brain.tokenizer.eos_token_id: break
+                        input_data = new_id 
 
-            print("\n\n[Node A] Session Closed.")
+                    end_time = time.perf_counter()
+                    tps = tokens_generated / (end_time - start_time)
+                    print(f"\n\n[⚡ Swarm Telemetry: {tps:.2f} Tokens/Sec]")
+                except KeyboardInterrupt:
+                    print("\nInterrupted by user.")
+                    break
 
     except KeyboardInterrupt:
-        print("\nStopped by user.")
+        print("\n\n[Swarm-OS] Shutdown Signal Received. Closing Sockets...")
     except Exception as e:
         print(f"\nError: {e}")
     finally:
-        if 'net' in locals():
-            net.close()
-        if discovery is not None:
-            discovery.cleanup()
+        if net: net.close()
+        if discovery: discovery.cleanup()
 
-# This allows you to still test it locally if needed
 if __name__ == "__main__":
     main()

@@ -49,6 +49,7 @@ import swarm_os
 import time
 
 # Initialize the Master Orchestrator
+# Make sure to run (swarm-os --role B) on the worker node device before executing the code
 bot = swarm_os.SwarmMaster(model_id="TinyLlama/TinyLlama-1.1B-Chat-v1.0")
 
 try:

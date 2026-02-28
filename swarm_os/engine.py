@@ -21,7 +21,9 @@ class SwarmWorker:
         print("[Node B] Broadcasting... Waiting for Master...")
         
         try:
+            print("\n")
             while True:
+                
                 incoming_numpy = self.net.recv_tensor()
                 
                 # Handshake / Reset Logic
@@ -61,7 +63,7 @@ class SwarmWorker:
                     safe_word = predicted_word.replace('\n', '\\n').replace('\r', '')
                     payload_size = incoming_numpy.nbytes / 1024
                     print(f"⚙️ [Node B Compute] 📥 Rcvd: {payload_size:.2f}KB | 🧠 Executed Layers 11-21 | 🎯 Predicted: '{safe_word}'")
-
+                print("\n")
         except KeyboardInterrupt:
             print("\n[Node B] Stopping...")
         finally:

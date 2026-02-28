@@ -83,39 +83,19 @@ class SwarmMaster:
         
         self.net.connect_to_next_node(target_ip, target_port)
         
-        # Handshake
         my_ip = [float(x) for x in self.discovery.local_ip.split('.')]
         handshake = np.array([-99.0, my_ip[0], my_ip[1], my_ip[2], my_ip[3]], dtype=np.float16)
         
         print("[Node A] Sending Handshake...")
-        # Simple retry logic for handshake
-        for _ in range(5):
-            self.net.send_tensor(handshake)
-            try:
-                # Non-blocking check would be better, but blocking is fine for sync
-                # We assume the user connects quickly. 
-                # For a library, we might want a short timeout here.
-                pass 
-            except: pass
-            time.sleep(0.5)
-        
-        # Ideally wait for ACK, but for prototype we assume connection
+        self.net.send_tensor(handshake)
         self.connected = True
         print("✅ Connected!")
 
-    def generate(self, user_prompt, max_tokens=200, stream=True):
-        """
-        Generates text. 
-        If stream=True, yields text chunks.
-        If stream=False, returns full string.
-        """
-        if not self.connected:
-            raise ConnectionError("Not connected to Swarm. Call connect() first.")
-
+    def _internal_generator(self, user_prompt, max_tokens):
+        """Hidden generator that does the actual math."""
         # 1. Send Reset Signal
         self.net.send_tensor(np.array([-999.0], dtype=np.float16))
-        # Wait for ACK
-        self.net.recv_tensor() 
+        self.net.recv_tensor() # Wait for ACK
 
         # 2. Prepare Prompt
         formatted_prompt = (
@@ -128,9 +108,7 @@ class SwarmMaster:
         seq_len = 0
         generated_ids = []
         prev_text = ""
-        full_response = ""
 
-        # 3. Inference Loop
         for _ in range(max_tokens):
             intermediate, memory_cache, seq_len = self.brain.process_node_A(
                 prompt_or_token=input_data, 
@@ -140,7 +118,6 @@ class SwarmMaster:
             
             self.net.send_tensor(intermediate.cpu().numpy().astype(np.float16))
             
-            # Wait for Node B
             token_numpy = self.net.recv_tensor()
             while token_numpy.size > 1 or token_numpy[0] < 0:
                 token_numpy = self.net.recv_tensor()
@@ -148,22 +125,32 @@ class SwarmMaster:
             new_id = int(token_numpy[0])
             generated_ids.append(new_id)
             
-            # Delta Decoding
             full_decoded = self.brain.tokenizer.decode(generated_ids, skip_special_tokens=True)
             new_text = full_decoded[len(prev_text):]
             prev_text = full_decoded
-            full_response += new_text
             
-            if stream:
-                yield new_text
+            yield new_text
             
             if new_id == self.brain.tokenizer.eos_token_id:
                 break
-                
             input_data = new_id
 
-        if not stream:
-            return full_response
+    def generate(self, user_prompt, max_tokens=300, stream=True):
+        """
+        Public API. 
+        If stream=True, returns a generator.
+        If stream=False, returns a fully concatenated string.
+        """
+        if not self.connected:
+            raise ConnectionError("Not connected to Swarm. Call connect() first.")
+
+        gen = self._internal_generator(user_prompt, max_tokens)
+        
+        if stream:
+            return gen
+        else:
+            # Exhaust the generator to build the full string
+            return "".join(list(gen))
 
     def close(self):
         self.net.close()
